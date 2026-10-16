@@ -34,8 +34,8 @@ the version is derived from. The code is that of the branch; pushing the `v0.7.1
 - [`notebooks/mudata_xenium_gene_protein.ipynb`](notebooks/mudata_xenium_gene_protein.ipynb): reads the public 10x
   Genomics *Xenium V1 Protein Human Kidney tiny* dataset (gene + protein, 21 MB, downloaded by the notebook) as a
   SpatialData object with a MuData table, and analyses both modalities: QC, RNA clustering and annotation, protein
-  normalization, proteins across cell types, gene vs protein concordance, spatial plots of both modalities, spatial
-  queries, and saving/reloading.
+  normalization, joint RNA + protein clustering (WNN), proteins across cell types, gene vs protein concordance, spatial
+  plots of both modalities, spatial queries, and saving/reloading.
 
 ## Notes
 
@@ -43,5 +43,6 @@ the version is derived from. The code is that of the branch; pushing the `v0.7.1
   so all the modalities annotate the same cells; a modality may cover a subset of them.
 - Following the MuData convention, global columns taken from a modality are named `"<modality>:<key>"`; `":"` is
   stored as `"%3A"` on disk, since it is not allowed in Windows file names.
-- muon 0.2.0's weighted nearest neighbors (`mu.pp.neighbors`) needs informative representations for every modality;
-  with a few sparse protein markers (many cells without any protein signal) it returns NaN distances, see the notebook.
+- muon 0.2.0's weighted nearest neighbors (`mu.pp.neighbors`) returns NaN for cells with identical profiles in a
+  modality (e.g. no signal for any protein of a small panel): it drops their neighbors at distance 0 and their kernel
+  bandwidth is 0. The notebook patches `muon.pp.neighbors` in place (two lines, checked against the installed version).
