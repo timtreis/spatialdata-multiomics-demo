@@ -1,0 +1,5 @@
+.venv/
+data/
+*.zarr/
+.ipynb_checkpoints/
+__pycache__/

@@ -1,0 +1,32 @@
+[project]
+name = "spatialdata-multiomics-demo"
+version = "0.1.0"
+description = "Multimodal (MuData) tables in SpatialData: development environment and demo notebook."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "igraph",
+  "ipykernel",
+  "jupyterlab",
+  "leidenalg",
+  "mudata>=0.4.1",
+  "muon",
+  "scanpy",
+  "spatialdata",
+  "spatialdata-io",
+  "spatialdata-plot",
+]
+
+[tool.uv]
+# an environment for the notebooks, not a package
+package = false
+
+# the development branches with MuData support; spatialdata-io comes from a fork until the branch is on scverse
+[tool.uv.sources]
+spatialdata = { git = "https://github.com/scverse/spatialdata", branch = "claude/mudata-support-sdata-c2tfjf" }
+spatialdata-io = { git = "https://github.com/timtreis/spatialdata-io", branch = "claude/mudata-support-sdata-c2tfjf" }
+spatialdata-plot = { git = "https://github.com/scverse/spatialdata-plot", branch = "claude/mudata-support-sdata-c2tfjf" }
+
+[tool.ruff]
+line-length = 120
+lint.select = [ "E", "F", "I", "W" ]
