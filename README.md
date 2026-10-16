@@ -23,7 +23,11 @@ uv sync                  # creates .venv with the three development branches
 uv run jupyter lab       # or select the .venv kernel in your editor
 ```
 
-`uv sync` installs the latest commit of each branch; `uv lock --upgrade` (then `uv sync`) picks up new commits.
+`uv.lock` pins the commit of each branch (and every other dependency), so `uv sync` reproduces the environment the
+notebooks were run in; `uv lock --upgrade` (then `uv sync`) picks up new commits of the branches.
+
+Installed from the fork, `spatialdata-io` reports a version like `0.1.devN`: the fork lacks the upstream release tags that
+the version is derived from. The code is that of the branch; pushing the `v0.7.1` tag to the fork fixes the version.
 
 ## Notebooks
 
