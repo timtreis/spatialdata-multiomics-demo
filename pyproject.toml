@@ -10,6 +10,7 @@ dependencies = [
   "ipykernel",
   "jupyterlab",
   "leidenalg",
+  "mantispy",
   "mofaflex>=0.1.2",
   "mofapy2",
   "mudata>=0.4.1",
@@ -21,6 +22,7 @@ dependencies = [
   "spatialdata",
   "spatialdata-io",
   "spatialdata-plot",
+  "squidpy",
   "tifffile",
 ]
 
@@ -33,6 +35,11 @@ package = false
 spatialdata = { git = "https://github.com/scverse/spatialdata", branch = "claude/mudata-support-sdata-c2tfjf" }
 spatialdata-io = { git = "https://github.com/timtreis/spatialdata-io", branch = "claude/mudata-support-sdata-c2tfjf" }
 spatialdata-plot = { git = "https://github.com/scverse/spatialdata-plot", branch = "claude/mudata-support-sdata-c2tfjf" }
+# the cp_measure image features of squidpy are not in a release yet (1.8.3 predates them); this branch also scales
+# the images to 0-1 per channel, which cp_measure's texture needs (scverse/squidpy#1321)
+squidpy = { git = "https://github.com/timtreis/squidpy", branch = "fix/cp-measure-intensity-range" }
+# mantispy (feature selection of the image features) is not released yet
+mantispy = { git = "https://github.com/scverse/mantispy", rev = "main" }
 
 [tool.ruff]
 line-length = 120

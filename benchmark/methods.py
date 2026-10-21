@@ -18,13 +18,15 @@ from pathlib import Path
 
 import mudata as md
 import numpy as np
+import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
 
 warnings.filterwarnings("ignore")
 N_THREADS = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count()))
 N_LATENT = 20
-METHODS = ["rna_pca", "scvi", "prot_markers", "concat", "wnn", "mofa", "totalvi"]  # MOFA-FLEX: mofaflex_retest.py
+METHODS = ["rna_pca", "scvi", "prot_markers", "concat", "wnn", "mofa", "totalvi", "image", "prot_image",
+           "rna_prot_image"]  # MOFA-FLEX: mofaflex_retest.py
 
 
 def inputs(cells, fold):
@@ -49,10 +51,54 @@ def prot_markers(rna, prot, cells, work_dir):
     return prot.X
 
 
-def concat(rna, prot, cells, work_dir):
+def _stack(*blocks):
     # each block scaled to unit total variance, so that neither modality dominates the distances
-    blocks = [rna_pca(rna, prot, cells, work_dir), prot.X]
     return np.hstack([b / np.sqrt(b.var(0).sum()) for b in blocks])
+
+
+def concat(rna, prot, cells, work_dir):
+    return _stack(rna_pca(rna, prot, cells, work_dir), prot.X)
+
+
+# image features that record where a cell is rather than what it looks like (they would leak the tissue region)
+POSITIONAL = ("Center_", "BoundingBoxMinimum", "BoundingBoxMaximum", "Location_", "SpatialMoment_")
+
+
+def image(rna, prot, cells, work_dir):
+    """cp_measure features (image_features.py) of the cell shape, the DAPI and the training stains only: scaled and
+    selected with mantispy (pycytominer's operations), then reduced by PCA."""
+    import anndata as ad
+    import mantispy as mt
+    from sklearn.decomposition import PCA
+
+    features = ad.read_h5ad(work_dir / "image_features.h5ad")
+    channel = np.array([name.rsplit("__", 1)[1] if "__" in name else "" for name in features.var_names])
+    keep = np.isin(channel, ["", "DAPI", *prot.var_names]) & ~features.var_names.str.startswith(POSITIONAL)
+    position = pd.Index(features.obs["cell_id"]).get_indexer(cells.obs["cell_id"].astype(str))
+    found = position >= 0
+    features = features[position[found]][:, keep].copy()
+    print(f"{(~found).sum()} of {len(found)} cells without image features (set to the median)")
+    # z-scores rather than mantispy's default median/MAD: on single cells most are negative for a sparse stain, its MAD
+    # is 0 and mad_robustize discards its features (for PD-L1, CD20 and granzyme B, 10 of 155 kept instead of 25)
+    mt.pp.normalize(features, method="standardize", by=None, reference=None)
+    # the selection is fit on 50,000 random cells: on all of them the correlation pass takes long and keeps the same
+    sample = np.sort(np.random.default_rng(0).choice(features.n_obs, min(50_000, features.n_obs), replace=False))
+    subset = features[sample].copy()
+    mt.pp.feature_select(subset)
+    selected = subset.var["selected"].to_numpy()
+    print(f"{selected.sum()} of {keep.sum()} image features selected; removed per operation:",
+          subset.uns["mantispy"]["feature_select"])
+    X = np.zeros((cells.n_obs, selected.sum()), dtype=np.float32)
+    X[found] = np.clip(np.asarray(features.X[:, selected], dtype=np.float32), -10, 10)  # heavy tails
+    return PCA(n_components=N_LATENT, svd_solver="randomized", random_state=0).fit_transform(X)
+
+
+def prot_image(rna, prot, cells, work_dir):
+    return _stack(prot.X, image(rna, prot, cells, work_dir))
+
+
+def rna_prot_image(rna, prot, cells, work_dir):
+    return _stack(rna_pca(rna, prot, cells, work_dir), prot.X, image(rna, prot, cells, work_dir))
 
 
 def patch_muon_wnn():
@@ -116,7 +162,6 @@ def scvi(rna, prot, cells, work_dir):
 
 def totalvi(rna, prot, cells, work_dir):
     # totalVI models protein counts; Xenium protein values are mean intensities, rounded here: an approximation
-    import pandas as pd
     import scvi as sv
 
     sv.settings.seed = 0
