@@ -8,7 +8,7 @@
 #SBATCH --output=logs/%x_%j.log
 ##SBATCH --partition=...
 ##SBATCH --account=...
-##SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:1
 set -euo pipefail
 : "${WORK_DIR:?set WORK_DIR to the directory written by prep.py (without --n-cells)}"
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK

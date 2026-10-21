@@ -1,11 +1,12 @@
 #!/bin/bash
 # One array task per (method, fold): 7 methods x 3 folds = 21 tasks.
 #   cd benchmark && WORK_DIR=/path/to/work sbatch slurm_benchmark.sh
-# Adapt the partition/account (and a GPU for scvi/totalvi, e.g. --gres=gpu:1) to your cluster.
+# Every task gets a GPU: the models train on it. Adapt the partition/account to your cluster.
 #SBATCH --job-name=rcc-benchmark
 #SBATCH --array=0-20
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
+#SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/%x_%A_%a.log
 ##SBATCH --partition=...

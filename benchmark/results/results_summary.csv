@@ -1,0 +1,8 @@
+method,no_train_neighbors_mean,no_train_neighbors_std,protein_r_mean,protein_r_std,gene_r_mean,gene_r_std,region_bal_acc_mean,region_bal_acc_std
+wnn,0.0,0.0,0.757,0.05,0.41,0.012,0.894,0.007
+concat,0.0,0.0,0.753,0.049,0.42,0.014,0.895,0.007
+mofa,0.0,0.0,0.745,0.045,0.422,0.016,0.888,0.003
+prot_markers,0.0,0.0,0.731,0.058,0.364,0.008,0.856,0.011
+totalvi,0.0,0.0,0.636,0.054,0.403,0.017,0.848,0.008
+scvi,0.0,0.0,0.623,0.06,0.393,0.017,0.838,0.001
+rna_pca,0.0,0.0,0.621,0.063,0.396,0.013,0.832,0.008

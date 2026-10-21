@@ -4,7 +4,7 @@
 
 Reads WORK_DIR/cells.h5mu (from `prep.py` without --n-cells) and writes OUT_DIR/totalvi.npz and OUT_DIR/mofa.npz,
 keyed by cell_id, so that the notebook can load them (OUT_DIR is `notebooks/cache` in this repository). The
-preprocessing is the one of the notebook. Set MOFA_GPU=1 to run MOFA+ on a GPU (needs cupy).
+preprocessing is the one of the notebook. The models train on a GPU.
 """
 
 import os
@@ -50,7 +50,7 @@ def main():
                                                      columns=prot.var_names)
             scvi.model.TOTALVI.setup_anndata(adata, layer="counts", protein_expression_obsm_key="prot_counts")
             model = scvi.model.TOTALVI(adata, n_latent=N_LATENT)
-            model.train(accelerator="auto", enable_progress_bar=False)
+            model.train(accelerator="gpu", enable_progress_bar=False)
             np.savez_compressed(out_dir / "totalvi.npz", cell_id=cell_id,
                                 latent=model.get_latent_representation().astype(np.float16))
         elif name == "mofa":
@@ -59,17 +59,18 @@ def main():
             mdata = md.MuData({"rna": rna, "prot": prot})
             outfile = out_dir / "mofa_model.hdf5"
             mu.tl.mofa(mdata, n_factors=N_LATENT, use_var=None, scale_views=True, convergence_mode="fast", seed=0,
-                       use_float32=True, gpu_mode=os.environ.get("MOFA_GPU") == "1", outfile=str(outfile),
+                       use_float32=True, gpu_mode=True, outfile=str(outfile),
                        save_data=False)
             variance = mdata.uns["mofa"]["variance"]
+            weights = mdata.varm["LFs"].astype(np.float32)  # rows: the RNA features, then the protein features
             np.savez_compressed(
                 out_dir / "mofa.npz",
                 cell_id=cell_id,
                 factors=mdata.obsm["X_mofa"].astype(np.float16),
                 genes=rna.var_names.to_numpy().astype(str),
-                weights_rna=mdata.mod["rna"].varm["LFs"].astype(np.float32),
+                weights_rna=weights[: rna.n_vars],
                 proteins=prot.var_names.to_numpy().astype(str),
-                weights_prot=mdata.mod["prot"].varm["LFs"].astype(np.float32),
+                weights_prot=weights[rna.n_vars :],
                 r2_rna=np.asarray(variance["rna"], dtype=np.float32),
                 r2_prot=np.asarray(variance["prot"], dtype=np.float32),
             )

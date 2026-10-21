@@ -5,10 +5,12 @@ description = "Multimodal (MuData) tables in SpatialData: environment, tutorial 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "cupy-cuda13x>=14.2.0 ; sys_platform == 'linux'",
   "igraph",
   "ipykernel",
   "jupyterlab",
   "leidenalg",
+  "mofaflex>=0.1.2",
   "mofapy2",
   "mudata>=0.4.1",
   "muon",

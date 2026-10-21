@@ -4,7 +4,7 @@
 
 Reads WORK_DIR/cells.h5mu and WORK_DIR/folds.json (from prep.py); writes WORK_DIR/cache/METHOD_fFOLD.npy (an
 embedding) or .npz (the WNN graph). Existing outputs are skipped. Threads follow SLURM_CPUS_PER_TASK when set; scVI and
-totalVI use a GPU when one is available.
+totalVI and MOFA+ train on a GPU.
 """
 
 import inspect
@@ -24,7 +24,7 @@ import scipy.sparse as sp
 warnings.filterwarnings("ignore")
 N_THREADS = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count()))
 N_LATENT = 20
-METHODS = ["rna_pca", "scvi", "prot_markers", "concat", "wnn", "mofa", "totalvi"]  # mofaflex: see the README
+METHODS = ["rna_pca", "scvi", "prot_markers", "concat", "wnn", "mofa", "totalvi"]  # MOFA-FLEX: mofaflex_retest.py
 
 
 def inputs(cells, fold):
@@ -94,29 +94,15 @@ def mofa(rna, prot, cells, work_dir):
     mdata = md.MuData({"rna": rna, "prot": prot})
     outfile = work_dir / "cache" / f"mofa_tmp_{os.getpid()}.hdf5"
     mu.tl.mofa(mdata, n_factors=N_LATENT, use_var=None, scale_views=True, convergence_mode="fast", seed=0,
-               outfile=str(outfile), save_data=False)
+               use_float32=True, gpu_mode=True, outfile=str(outfile), save_data=False)
     outfile.unlink()
     return mdata.obsm["X_mofa"]
-
-
-def mofaflex(rna, prot, cells, work_dir):
-    """Not in METHODS: on this data most factors reproduce single proteins and the RNA is mostly ignored (README)."""
-    import mofaflex as mf
-
-    mdata = md.MuData({"rna": rna.copy(), "prot": prot.copy()})
-    model = mf.MOFAFLEX(
-        mdata,
-        mf.DataOptions(subset_var=None, plot_data_overview=False),
-        mf.ModelOptions(n_factors=N_LATENT, weight_prior="Horseshoe", likelihoods="Normal"),
-        mf.TrainingOptions(device="cpu", batch_size=5000, lr=0.05, max_epochs=1000, early_stopper_patience=50, seed=0),
-    )
-    return next(iter(model.get_factors().values())).loc[mdata.obs_names].to_numpy(dtype=np.float32)
 
 
 def _train(model):
     # scvi-tools defaults: the epoch heuristic and no early stopping (with the KL warm-up, the validation ELBO can
     # rise in the first epochs and stop the training after a few of them)
-    model.train(accelerator="auto", enable_progress_bar=False)
+    model.train(accelerator="gpu", enable_progress_bar=False)
     return model.get_latent_representation()
 
 

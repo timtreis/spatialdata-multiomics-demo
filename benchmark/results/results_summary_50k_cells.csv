@@ -1,0 +1,12 @@
+method,no_train_neighbors_mean,no_train_neighbors_std,protein_r_mean,protein_r_std,gene_r_mean,gene_r_std,region_bal_acc_mean,region_bal_acc_std
+wnn,0.0,0.0,0.725,0.018,0.402,0.021,0.88,0.006
+mofa,0.0,0.0,0.723,0.023,0.415,0.02,0.875,0.007
+concat,0.0,0.0,0.723,0.019,0.413,0.02,0.879,0.011
+prot_markers,0.0,0.0,0.688,0.028,0.357,0.026,0.845,0.013
+totalvi,0.0,0.0,0.681,0.029,0.407,0.021,0.868,0.008
+mfx-horseshoe-pca,0.0,,0.677,,0.349,,0.848,
+mfx-default-pca,0.0,,0.671,,0.345,,0.846,
+mfx-handover,0.0,,0.662,,0.335,,0.85,
+mfx-nb-pca,0.0,,0.65,,0.334,,0.842,
+scvi,0.0,0.0,0.628,0.029,0.393,0.02,0.831,0.007
+rna_pca,0.0,0.0,0.611,0.026,0.391,0.018,0.82,0.018
