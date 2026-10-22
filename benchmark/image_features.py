@@ -4,8 +4,8 @@
 
 Uses the cell segmentation and the "stains" image of `notebooks/helpers.load`, written once to STORE.zarr: squidpy
 sends the image to worker processes, which works for zarr-backed images but not for the lazily read OME-TIFFs. With
---crop, only a central window of UM x UM µm is featurized (to time it and look at the features). Worker processes
-follow SLURM_CPUS_PER_TASK.
+--crop, only a central window of UM x UM µm is featurized (to time it and look at the features). One worker process
+per CPU of SLURM_CPUS_PER_TASK; run with `python -u` to see the progress bar in a log file.
 """
 
 import argparse

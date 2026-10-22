@@ -77,7 +77,7 @@ def image(rna, prot, cells, work_dir):
     position = pd.Index(features.obs["cell_id"]).get_indexer(cells.obs["cell_id"].astype(str))
     found = position >= 0
     features = features[position[found]][:, keep].copy()
-    print(f"{(~found).sum()} of {len(found)} cells without image features (set to the median)")
+    print(f"{(~found).sum()} of {len(found)} cells without image features (set to the mean)")
     # z-scores rather than mantispy's default median/MAD: on single cells most are negative for a sparse stain, its MAD
     # is 0 and mad_robustize discards its features (for PD-L1, CD20 and granzyme B, 10 of 155 kept instead of 25)
     mt.pp.normalize(features, method="standardize", by=None, reference=None)
@@ -89,7 +89,8 @@ def image(rna, prot, cells, work_dir):
     print(f"{selected.sum()} of {keep.sum()} image features selected; removed per operation:",
           subset.uns["mantispy"]["feature_select"])
     X = np.zeros((cells.n_obs, selected.sum()), dtype=np.float32)
-    X[found] = np.clip(np.asarray(features.X[:, selected], dtype=np.float32), -10, 10)  # heavy tails
+    # z-scores: a missing value (a cell without image features, or an undefined feature of a cell) is set to the mean
+    X[found] = np.nan_to_num(np.clip(np.asarray(features.X[:, selected], dtype=np.float32), -10, 10), nan=0)
     return PCA(n_components=N_LATENT, svd_solver="randomized", random_state=0).fit_transform(X)
 
 

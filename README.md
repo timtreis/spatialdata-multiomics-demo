@@ -19,23 +19,39 @@ With [uv](https://docs.astral.sh/uv/):
 ```bash
 git clone https://github.com/timtreis/spatialdata-multiomics-demo
 cd spatialdata-multiomics-demo
-uv sync                  # creates .venv with the three development branches
+uv sync                  # creates .venv with the development branches
 uv run jupyter lab       # or select the .venv kernel in your editor
 ```
 
 `uv.lock` pins the commit of each branch (and every other dependency), so `uv sync` reproduces the environment the
-notebooks were run in; `uv lock --upgrade` (then `uv sync`) picks up new commits of the branches.
+notebooks were run in; `uv lock --upgrade` (then `uv sync`) picks up new commits of the branches. Besides the MuData
+branches, squidpy comes from a branch that scales the stains for cp_measure (scverse/squidpy#1321) and mantispy from
+its main branch, neither released yet. On Linux, `cupy` is installed for MOFA+ on a GPU.
 
 Installed from the fork, `spatialdata-io` reports a version like `0.1.devN`: the fork lacks the upstream release tags that
 the version is derived from. The code is that of the branch; pushing the `v0.7.1` tag to the fork fixes the version.
 
-## Notebooks
+## Tutorial
 
-- [`notebooks/mudata_xenium_gene_protein.ipynb`](notebooks/mudata_xenium_gene_protein.ipynb): reads the public 10x
-  Genomics *Xenium V1 Protein Human Kidney tiny* dataset (gene + protein, 21 MB, downloaded by the notebook) as a
-  SpatialData object with a MuData table, and analyses both modalities: QC, RNA clustering and annotation, protein
-  normalization, joint RNA + protein clustering (WNN), proteins across cell types, gene vs protein concordance, spatial
-  plots of both modalities, spatial queries, and saving/reloading.
+[`notebooks/rcc_multimodal.ipynb`](notebooks/rcc_multimodal.ipynb): immune cells around a kidney tumor, read from RNA
+and protein in the same cells. A 10x Genomics Xenium Protein section of FFPE clear cell renal cell carcinoma (425,878
+cells after QC, 405 genes, 27 proteins, H&E and a pathologist's annotation), analysed as one SpatialData object with a
+MuData table: quality control and normalization of both modalities, joint models (MOFA+, totalVI), cell types from
+protein and RNA together, the organisation of the immune cells relative to the tumor, where the protein rescues the
+sparse RNA, and image features of the stains (cp_measure through squidpy, selected with mantispy). Written for
+biologists; every figure comes with its interpretation.
+
+The data (about 22 GB of the 36 GB bundle) are downloaded by the notebook. The trained models and the clustering are
+in `notebooks/cache`, so the notebook runs in about 15 minutes; `RETRAIN = True` trains them again (totalVI and MOFA+
+on a GPU).
+
+## Benchmark
+
+[`benchmark/`](benchmark/README.md): does modelling RNA and protein jointly describe cells better than either
+modality alone, and do image features add to the mean stain intensities? Ten representations, scored by how well
+they predict held-out proteins, genes and pathology regions. Joint representations beat either modality alone; the
+simple ones (concatenation, WNN) match the models (MOFA+, totalVI); image features carry information but add little
+to the markers. Run on a SLURM cluster with GPUs.
 
 ## Notes
 
@@ -45,4 +61,4 @@ the version is derived from. The code is that of the branch; pushing the `v0.7.1
   stored as `"%3A"` on disk, since it is not allowed in Windows file names.
 - muon 0.2.0's weighted nearest neighbors (`mu.pp.neighbors`) returns NaN for cells with identical profiles in a
   modality (e.g. no signal for any protein of a small panel): it drops their neighbors at distance 0 and their kernel
-  bandwidth is 0. The notebook patches `muon.pp.neighbors` in place (two lines, checked against the installed version).
+  bandwidth is 0. The benchmark patches `muon.pp.neighbors` in place (two lines, checked against the installed version).

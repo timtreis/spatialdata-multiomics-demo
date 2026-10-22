@@ -1,8 +1,8 @@
 # Joint vs single-modality representations of Xenium RNA + protein
 
-Does modelling RNA and protein jointly describe cells better than either modality alone? On the 10x Xenium Protein
-FFPE renal cell carcinoma (425,878 cells after QC, 405 genes, 27 proteins), we compare cell representations by how
-well they predict what they were not trained on.
+Does modelling RNA and protein jointly describe cells better than either modality alone, and do image features of the
+stains add to the mean intensities? On the 10x Xenium Protein FFPE renal cell carcinoma (425,878 cells after QC, 405
+genes, 27 proteins), we compare cell representations by how well they predict what they were not trained on.
 
 ## Setup
 
@@ -18,6 +18,11 @@ well they predict what they were not trained on.
   - protein: the z-scored log1p markers.
   - RNA + protein: RNA PCA and markers concatenated, each block scaled to unit total variance; WNN (muon); MOFA+;
     totalVI.
+  - image: cp_measure features (intensity, size and shape, texture, granularity, radial distribution;
+    `image_features.py`) of the cell shape, the DAPI and the 18 training stains, never of the held-out ones; features
+    that record the position of a cell are dropped. They are z-scored and selected with mantispy (pycytominer's steps:
+    drop degenerate, constant, mostly missing and correlated features; about 1,300 of 3,000 kept per fold), then
+    reduced to 20 principal components. Alone, with the markers, and with RNA PCA and the markers.
 
 ## Results (all cells, mean of 3 folds)
 
@@ -32,6 +37,9 @@ well they predict what they were not trained on.
 | WNN | RNA + protein | 0.757 | 0.410 | 0.894 |
 | MOFA+ | RNA + protein | 0.745 | 0.422 | 0.888 |
 | totalVI | RNA + protein | 0.636 | 0.403 | 0.848 |
+| image features | image | 0.670 | 0.345 | 0.822 |
+| markers + image features | protein + image | 0.730 | 0.372 | 0.859 |
+| RNA PCA + markers + image features | RNA + protein + image | 0.756 | 0.419 | 0.897 |
 
 Per fold and per feature: `results/results_per_fold.csv`, `results/results_per_feature.csv`.
 
@@ -44,7 +52,26 @@ Per fold and per feature: `results/results_per_fold.csv`, `results/results_per_f
 - **totalVI is barely better than RNA alone on proteins** (0.636 vs 0.623). It models protein counts with a background component;
   Xenium protein values are background-subtracted mean intensities, which we round to integers to fit it. The model
   is therefore misspecified for this data, and its result should not be read as a verdict on totalVI for CITE-seq.
-- On a 50,000-cell subsample the ranking is the same (`results/results_summary_50k_cells.csv`).
+- **The image features carry information, but little that the mean intensities do not.** From the images of the
+  training stains alone, a cell's held-out proteins are predicted better than from any RNA representation (0.670).
+  Added to the markers, or to RNA and markers, they change the scores by less than 0.01: a small gain in every fold
+  for the held-out genes with the markers (0.002 to 0.011), and for proteins and region with RNA and markers (0.001
+  to 0.005), all within the spread over folds.
+- On a 50,000-cell subsample the ranking of the first seven methods is the same
+  (`results/results_summary_50k_cells.csv`).
+
+### Two pitfalls of the image features
+
+- **Texture needs the image scaled to its range.** cp_measure maps a 16-bit image to 256 gray levels by the full
+  dtype range for its texture features; the Xenium stains use a small part of it, so in most cells a stain has one or
+  two gray levels and its texture is undefined (77% of the values on a test window). squidpy's
+  `calculate_image_features` scales each channel to 0-1 by its 99.9th percentile first (`intensity_range="auto"`,
+  from scverse/squidpy#1321; this repository installs that branch). Before the fix, the image features alone scored
+  0.540 / 0.274 / 0.749.
+- **Median/MAD scaling discards sparse stains.** mantispy's default normalization (`mad_robustize`) is made for
+  well-averaged profiles; on single cells most cells are negative for a sparse stain, its MAD is 0, and the selection
+  then drops its features (10 of 155 kept for PD-L1, CD20 and granzyme B, against 25 with z-scores). We use
+  `method="standardize"`.
 
 ## Methods not included
 
@@ -74,10 +101,13 @@ Training runs on a GPU (scVI, totalVI, MOFA+ through cupy); a job without one fa
 ```bash
 cd benchmark
 python prep.py ../data WORK_DIR                    # QC, pathology region per cell, folds (add --n-cells N to subsample)
-WORK_DIR=WORK_DIR sbatch slurm_benchmark.sh        # 7 methods x 3 folds, one GPU task each
+python image_features.py ../data IMAGES.zarr WORK_DIR/image_features.h5ad   # CPU, 2 h on 64 cores
+WORK_DIR=WORK_DIR sbatch slurm_benchmark.sh        # 10 methods x 3 folds, one GPU task each
 python evaluate.py WORK_DIR                        # results_*.csv in WORK_DIR
 python plot_results.py WORK_DIR/results_per_fold.csv benchmark.png
 ```
 
 `../data` is filled by `notebooks/helpers.download`. Measured on one A100/H100 with 8 CPU cores and all cells:
-scVI and totalVI about 6 min per fold, MOFA+ 2 to 3 min, WNN 8 min (CPU code).
+scVI and totalVI about 6 min per fold, MOFA+ 2 to 3 min, WNN 8 min (CPU code), the image arms 2 to 5 min. The image
+features take 2 hours on 64 CPU cores for all cells (texture and the radial features dominate);
+`python -u` shows squidpy's progress bar in a log file.
