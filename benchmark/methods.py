@@ -7,11 +7,9 @@ embedding) or .npz (the WNN graph). Existing outputs are skipped. Threads follow
 totalVI and MOFA+ train on a GPU.
 """
 
-import inspect
 import json
 import os
 import sys
-import textwrap
 import time
 import warnings
 from pathlib import Path
@@ -60,37 +58,26 @@ def concat(rna, prot, cells, work_dir):
     return _stack(rna_pca(rna, prot, cells, work_dir), prot.X)
 
 
-# image features that record where a cell is rather than what it looks like (they would leak the tissue region)
-POSITIONAL = ("Center_", "BoundingBoxMinimum", "BoundingBoxMaximum", "Location_", "SpatialMoment_")
-
-
 def image(rna, prot, cells, work_dir):
-    """cp_measure features (image_features.py) of the cell shape, the DAPI and the training stains only: scaled and
-    selected with mantispy (pycytominer's operations), then reduced by PCA."""
+    """PCA of the morphology features (`helpers.morphology`) of the cell shape, the DAPI and the training stains only,
+    preprocessed as in the notebook with mantispy's single-cell workflow (`helpers.preprocess_morphology`)."""
     import anndata as ad
-    import mantispy as mt
     from sklearn.decomposition import PCA
 
-    features = ad.read_h5ad(work_dir / "image_features.h5ad")
-    channel = np.array([name.rsplit("__", 1)[1] if "__" in name else "" for name in features.var_names])
-    keep = np.isin(channel, ["", "DAPI", *prot.var_names]) & ~features.var_names.str.startswith(POSITIONAL)
-    position = pd.Index(features.obs["cell_id"]).get_indexer(cells.obs["cell_id"].astype(str))
-    found = position >= 0
-    features = features[position[found]][:, keep].copy()
-    print(f"{(~found).sum()} of {len(found)} cells without image features (set to the mean)")
-    # z-scores rather than mantispy's default median/MAD: on single cells most are negative for a sparse stain, its MAD
-    # is 0 and mad_robustize discards its features (for PD-L1, CD20 and granzyme B, 10 of 155 kept instead of 25)
-    mt.pp.normalize(features, method="standardize", by=None, reference=None)
-    # the selection is fit on 50,000 random cells: on all of them the correlation pass takes long and keeps the same
-    sample = np.sort(np.random.default_rng(0).choice(features.n_obs, min(50_000, features.n_obs), replace=False))
-    subset = features[sample].copy()
-    mt.pp.feature_select(subset)
-    selected = subset.var["selected"].to_numpy()
-    print(f"{selected.sum()} of {keep.sum()} image features selected; removed per operation:",
-          subset.uns["mantispy"]["feature_select"])
-    X = np.zeros((cells.n_obs, selected.sum()), dtype=np.float32)
-    # z-scores: a missing value (a cell without image features, or an undefined feature of a cell) is set to the mean
-    X[found] = np.nan_to_num(np.clip(np.asarray(features.X[:, selected], dtype=np.float32), -10, 10), nan=0)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks"))
+    import helpers
+
+    raw = ad.read_h5ad(work_dir / "image_features.h5ad")
+    raw.obs_names = raw.obs["cell_id"].astype(str).to_numpy()
+    raw = raw[raw.obs_names.isin(cells.obs_names)].copy()
+    profiles = helpers.morphology_profiles(raw, pd.DataFrame(cells.obsm["spatial"], index=cells.obs_names))
+    image_shape = helpers.stain_image_shape(Path(__file__).resolve().parents[1] / "data")
+    morph = helpers.preprocess_morphology(profiles, image_shape, channels=["DAPI", *prot.var_names])
+    found = cells.obs_names.isin(morph.obs_names)
+    print(f"{(~found).sum()} of {len(found)} cells without image features or failing their QC (set to the mean); "
+          f"{morph.n_vars} features selected, removed per operation: {morph.uns['feature_select']}")
+    X = np.zeros((cells.n_obs, morph.n_vars), dtype=np.float32)
+    X[found] = morph[cells.obs_names[found]].X
     return PCA(n_components=N_LATENT, svd_solver="randomized", random_state=0).fit_transform(X)
 
 
@@ -102,29 +89,13 @@ def rna_prot_image(rna, prot, cells, work_dir):
     return _stack(rna_pca(rna, prot, cells, work_dir), prot.X, image(rna, prot, cells, work_dir))
 
 
-def patch_muon_wnn():
-    """muon 0.2.0's WNN returns NaN for cells whose neighbors in a modality are at distance 0 (identical profiles)."""
-    import muon.pp
-
-    source = textwrap.dedent(inspect.getsource(muon.pp.neighbors))
-    fixes = {
-        # include the neighbors at distance 0, which `.nonzero()` drops
-        "X[neighbordistances[cell, :].nonzero()[1], :]": (
-            "X[neighbordistances.indices[neighbordistances.indptr[cell] : neighbordistances.indptr[cell + 1]], :]"
-        ),
-        # keep the kernel bandwidth above the nearest-neighbor distance, which is 0 for identical profiles
-        "        currtheta = 0\n": "        csigmas = np.maximum(csigmas, nndistances + eps)\n        currtheta = 0\n",
-    }
-    for old, new in fixes.items():
-        assert source.count(old) == 1, "the patch does not apply to this muon version"
-        source = source.replace(old, new)
-    exec(compile(source, muon.pp.__file__, "exec"), muon.pp.__dict__)
-
-
 def wnn(rna, prot, cells, work_dir):
     import muon as mu
 
-    patch_muon_wnn()
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks"))
+    import helpers
+
+    helpers.patch_muon_wnn()
     rna.obsm["X_pca"] = rna_pca(rna, prot, cells, work_dir)
     sc.pp.neighbors(rna, n_neighbors=20, use_rep="X_pca")
     prot.obsm["X_markers"] = prot.X.copy()

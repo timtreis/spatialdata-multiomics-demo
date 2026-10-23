@@ -33,17 +33,20 @@ the version is derived from. The code is that of the branch; pushing the `v0.7.1
 
 ## Tutorial
 
-[`notebooks/rcc_multimodal.ipynb`](notebooks/rcc_multimodal.ipynb): immune cells around a kidney tumor, read from RNA
-and protein in the same cells. A 10x Genomics Xenium Protein section of FFPE clear cell renal cell carcinoma (425,878
-cells after QC, 405 genes, 27 proteins, H&E and a pathologist's annotation), analysed as one SpatialData object with a
-MuData table: quality control and normalization of both modalities, joint models (MOFA+, totalVI), cell types from
-protein and RNA together, the organisation of the immune cells relative to the tumor, where the protein rescues the
-sparse RNA, and image features of the stains (cp_measure through squidpy, selected with mantispy). Written for
-biologists; every figure comes with its interpretation.
+[`notebooks/rcc_multimodal.ipynb`](notebooks/rcc_multimodal.ipynb): immune cells around a kidney tumor, read from the
+transcripts and the stained images of the same cells. A 10x Genomics Xenium Protein section of FFPE clear cell renal
+cell carcinoma (408,798 cells after QC, 405 genes, DAPI and 27 protein stains, H&E and a pathologist's annotation),
+analysed as one SpatialData object with a MuData table of two modalities: `rna`, the Xenium transcripts, and `morph`,
+morphology features of every cell in DAPI and 26 of the stains (cp_measure through squidpy, each stain scaled from its
+background; HLA-DR is left out, its texture being undefined in the many cells without its signal), preprocessed with
+the mantispy single-cell workflow. Each modality is preprocessed on its own, their latent spaces are compared, and they are then
+modelled jointly (MOFA+, weighted nearest neighbors), giving cell types, the organisation of the immune cells relative
+to the tumor, and where the protein stains rescue the sparse RNA. Written for biologists; every figure comes with its
+interpretation.
 
-The data (about 22 GB of the 36 GB bundle) are downloaded by the notebook. The trained models and the clustering are
-in `notebooks/cache`, so the notebook runs in about 15 minutes; `RETRAIN = True` trains them again (totalVI and MOFA+
-on a GPU).
+The data (about 22 GB of the 36 GB bundle) are downloaded by the notebook. The morphology features (`data/morph.h5ad`),
+the MOFA+ model and the clustering are cached, so the notebook only computes them once; `RETRAIN = True` trains the
+models again (MOFA+ on a GPU).
 
 ## Benchmark
 
@@ -61,4 +64,4 @@ to the markers. Run on a SLURM cluster with GPUs.
   stored as `"%3A"` on disk, since it is not allowed in Windows file names.
 - muon 0.2.0's weighted nearest neighbors (`mu.pp.neighbors`) returns NaN for cells with identical profiles in a
   modality (e.g. no signal for any protein of a small panel): it drops their neighbors at distance 0 and their kernel
-  bandwidth is 0. The benchmark patches `muon.pp.neighbors` in place (two lines, checked against the installed version).
+  bandwidth is 0. `helpers.patch_muon_wnn` patches `muon.pp.neighbors` in place (two lines, checked against the installed version).

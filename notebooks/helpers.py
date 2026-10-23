@@ -7,6 +7,7 @@ OME-TIFF pyramids, without converting them.
 """
 
 import io
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -142,11 +143,14 @@ def _lazy_image(levels: list[da.Array], c_coords: list[str], transformation) -> 
 
 
 def load(data_dir: str | Path) -> SpatialData:
-    """The dataset as SpatialData: segmentation, cell boundaries, a MuData table (RNA + protein), stains, H&E, pathology."""
+    """The dataset as SpatialData: segmentation, cell boundaries, a MuData table (RNA), stains, H&E, pathology.
+
+    The morphology modality is added to the table by :func:`morphology`.
+    """
     data_dir = Path(data_dir)
     sdata = xenium(
         data_dir / "outs",
-        multimodal=True,  # the table is a MuData object with an "rna" and a "prot" modality
+        multimodal=True,  # the table is a MuData object, with one modality per measurement of the cells
         transcripts=False,
         morphology_mip=False,
         morphology_focus=False,  # the stains are added below, without the background channels
@@ -167,6 +171,11 @@ def load(data_dir: str | Path) -> SpatialData:
     pathology = gpd.read_file(data_dir / "pathology_annotation.geojson")[["name", "geometry"]]
     pathology = pathology.rename(columns={"name": "region"}).set_crs(None, allow_override=True)
     sdata["pathology"] = ShapesModel.parse(gpd.GeoDataFrame(pathology), transformations={"global": he_to_morphology})
+    # the protein of each cell is measured from the stains by morphology(); 10x's own per-cell mean intensities go
+    table = sdata["table"]
+    del table.mod["prot"]
+    table.update()
+    del table.obsm["prot"], table.varm["prot"]  # left behind by update()
     return sdata
 
 
@@ -188,65 +197,204 @@ def pathology_region(sdata: SpatialData, table_name: str = "table") -> np.ndarra
     return region
 
 
-def normalize(rna, prot) -> None:
-    """In place: RNA counts to log-normalized expression, protein intensities to log1p z-scores (raw ones in layers)."""
+CP_FEATURES = ["cp_measure:intensity", "cp_measure:sizeshape", "cp_measure:texture", "cp_measure:granularity",
+               "cp_measure:radial"]
+
+
+def stain_ranges(sdata: SpatialData, scale: str = "scale2") -> dict[str, tuple[float, float]]:
+    """Per stain, the ``(low, high)`` intensities that cp_measure's input is scaled to 0-1 by.
+
+    The protein stains sit on a camera offset of about 99 counts. ``low`` is the background, the median of the tissue
+    pixels outside the cells; ``high`` the 99.99th percentile of the pixels in cells, so that the rare positive cells
+    of a sparse stain are not clipped. From a downsampled level of the image pyramid (reading the full resolution
+    takes an hour).
+    """
+    image = sdata["stains"][scale]["image"]
+    pixels = np.asarray(image.values)
+    cells = np.asarray(sdata["cell_labels"][scale]["image"].values) > 0
+    background = ~cells & (pixels[0] > 0)  # outside the scanned area every channel is 0
+    return {str(c): (float(np.median(x[background])), float(np.percentile(x[cells], 99.99)))
+            for c, x in zip(image.c.values, pixels, strict=True)}
+
+
+def morphology(sdata: SpatialData, data_dir: str | Path, n_jobs: int | None = None):
+    """The raw cp_measure features of every cell, from the DAPI and the 27 protein stains (squidpy's names).
+
+    Computed once (about 2 hours on 64 CPU cores for this section) and cached as ``data_dir/morph.h5ad``. The stains
+    are first written to a zarr store, which squidpy's worker processes read; it is deleted afterwards.
+    """
+    import anndata as ad
+    import pandas as pd
+    import squidpy as sq
+    from spatialdata import read_zarr
+
+    out = Path(data_dir) / "morph.h5ad"
+    if not out.exists():
+        store = Path(data_dir) / "morph_images.zarr"
+        if not store.exists():
+            SpatialData(images={"stains": sdata["stains"]}, labels={"cell_labels": sdata["cell_labels"]}).write(store)
+        features = sq.experimental.im.calculate_image_features(
+            # each stain scaled to 0-1 from its background to its brightest cells: cp_measure's texture quantizes it
+            # into 256 gray levels, and its radial and intensity ratios need the camera offset removed
+            read_zarr(store), image_key="stains", labels_key="cell_labels", scale="scale0", features=CP_FEATURES,
+            intensity_range=stain_ranges(sdata), n_jobs=n_jobs or os.cpu_count(), inplace=False,
+        )
+        table = sdata["table"]
+        instance_key = table.uns["spatialdata_attrs"]["instance_key"]
+        cell_id = pd.Series(table.obs["cell_id"].to_numpy().astype(str), index=table.obs[instance_key].to_numpy())
+        features.obs["cell_id"] = cell_id.reindex(features.obs["label_id"].to_numpy()).to_numpy()
+        features.write_h5ad(out)
+        shutil.rmtree(store)
+    features = ad.read_h5ad(out)
+    features.obs_names = features.obs["cell_id"].astype(str).to_numpy()
+    return features
+
+
+def _cellprofiler_name(name: str) -> str:
+    """A squidpy cp_measure column name in CellProfiler's grammar (``Cells_<group>_<feature>_<stain>[_<params>]``),
+    which mantispy parses into its feature annotation."""
+    if "__" not in name:
+        return f"Cells_AreaShape_{name}"
+    feature, stain = name.rsplit("__", 1)
+    group, _, rest = feature.partition("_")
+    if group in ("Intensity", "Location", "Granularity"):
+        return f"Cells_{group}_{rest}_{stain}"
+    if group == "RadialDistribution":
+        kind, _, params = rest.partition("_")
+        return f"Cells_RadialDistribution_{kind}_{stain}_{params}"
+    texture, params = feature.rsplit("_", 3)[0], "_".join(feature.rsplit("_", 3)[1:])  # Contrast_3_00_256
+    return f"Cells_Texture_{texture}_{stain}_{params}"
+
+
+def stain_image_shape(data_dir: str | Path) -> tuple[int, int]:
+    """(height, width) in pixels of the full-resolution stain images, read from the header of the DAPI image."""
+    with tifffile.TiffFile(Path(data_dir) / "morphology_focus" / f"{STAINS['DAPI']}.ome.tif") as tif:
+        return tuple(tif.series[0].shape[-2:])
+
+
+def morphology_profiles(raw, centroids):
+    """The raw features as a mantispy object of single cells, indexed by cell_id.
+
+    mantispy's cell-level objects identify a cell by its plate, well, image and object number, as in a screen; the
+    section is one plate, one well and one image, and the object number is the cell's label in the segmentation.
+    ``centroids`` (cell_id x [x, y], in µm, as in the table's ``obsm["spatial"]``) places each cell in the image, for
+    mantispy's border check.
+    """
+    import pandas as pd
+    from mantispy.io._profiles import from_dataframe  # the in-memory reader, not exported from mantispy.io yet
+
+    # mantispy drops the location and centroid features itself; the raw spatial moments also depend on position
+    raw = raw[:, ~raw.var_names.str.startswith("SpatialMoment_")]
+    raw = raw[:, ~raw.var_names.str.endswith(tuple(f"__{s}" for s in EXCLUDED_STAINS))]
+    values = pd.DataFrame(np.asarray(raw.X, dtype=np.float32), columns=[_cellprofiler_name(n) for n in raw.var_names])
+    ids = pd.DataFrame({"Metadata_Plate": "rcc_section", "Metadata_Well": "A01", "Metadata_ImageID": "rcc_section",
+                        "Metadata_ObjectType": "Cells",
+                        "Metadata_ObjectNumber": raw.obs["label_id"].astype(int).to_numpy()})
+    channels = [s for s in STAINS if s not in EXCLUDED_STAINS]
+    profiles = from_dataframe(pd.concat([ids, values], axis=1), channels=channels, resolution="object")
+    profiles.obs_names = raw.obs["cell_id"].astype(str).to_numpy()
+    xy = pd.DataFrame(centroids).loc[profiles.obs_names].to_numpy() / PIXEL_SIZE  # µm -> image pixels
+    profiles.obs["Metadata_Center_X"], profiles.obs["Metadata_Center_Y"] = xy[:, 0], xy[:, 1]
+    return profiles
+
+
+#: stains left out of the morphology modality: 7.5% of the cells (after QC) have no HLA-DR signal above its
+#: background, which leaves its texture undefined in them; removing those cells would remove only HLA-DR-negative ones
+EXCLUDED_STAINS = ("HLA-DR",)
+
+#: feature_select's steps for single cells in mantispy's documentation (the default ones, plus drop_outliers)
+SINGLE_CELL_OPERATIONS = ("drop_degenerate", "variance_threshold", "correlation_threshold", "drop_na_columns",
+                          "blocklist", "drop_outliers")
+
+
+#: cells closer than this to the edge of the scanned area have stains cut off (no signal in any stain)
+BORDER_UM = 20
+
+
+def preprocess_morphology(profiles, image_shape: tuple[int, int], channels: list[str] | None = None):
+    """mantispy's single-cell workflow: cell QC, feature QC, normalization, feature selection.
+
+    Three choices differ from mantispy's defaults, because on single cells of a tissue they lose signal (the
+    notebook shows each comparison): z-scores instead of median/MAD normalization (most cells are negative for a
+    sparse stain, its MAD is 0 and its features are flagged degenerate); the few cells with an undefined feature are
+    removed, so that the selection's ``na_cutoff=0`` does not drop most texture features for them; and cells with an
+    unusual area are flagged (``obs["qc_area_outlier"]``) but kept, since in a tissue they are large or small cell
+    types, not segmentation errors, which the QC on cell area has already removed. Cells within ``BORDER_UM`` of the
+    edge of the image (``image_shape``, in pixels) are removed: the stains are cut off there. ``channels`` limits the
+    features to those stains (and the cell shape).
+    """
+    import mantispy as mt
+
+    a = profiles.copy()
+    if channels is not None:
+        a = a[:, a.var["channel"].isna().to_numpy() | a.var["channel"].isin(channels).to_numpy()].copy()
+    mt.pp.calculate_qc_metrics(a, image_shape=image_shape, border_margin=round(BORDER_UM / PIXEL_SIZE),
+                               max_nan_fraction=0.0)
+    # area outliers kept, see above
+    a.obs["qc_pass"] = (a.obs["qc_nan_fraction"].to_numpy() == 0) & ~a.obs["qc_is_border"].to_numpy()
+    mt.pp.filter_cells(a, min_cells_per_well=0)
+    mt.pp.filter_features(a, min_variance=1e-8)
+    mt.pp.normalize(a, method="standardize", by="Metadata_Plate", reference=None)
+    mt.pp.feature_select(a, operations=SINGLE_CELL_OPERATIONS, na_cutoff=0.0)
+    a.uns["feature_select"] = dict(a.uns["mantispy"]["feature_select"])
+    return mt.pp.subset_features(a)
+
+
+def normalize_rna(rna) -> None:
+    """In place: RNA counts to log-normalized expression (the counts kept in ``layers["counts"]``)."""
     import scanpy as sc
-    import scipy.sparse as sp
 
     rna.layers["counts"] = rna.X.copy()
     sc.pp.normalize_total(rna)
     sc.pp.log1p(rna)
-    prot.layers["intensity"] = np.asarray(prot.X.toarray() if sp.issparse(prot.X) else prot.X, dtype=np.float32)
-    prot.X = np.log1p(prot.layers["intensity"])
-    sc.pp.scale(prot, max_value=10)
 
 
 N_LATENT = 20
 
 
-def train_totalvi(rna, prot, out: Path) -> None:
-    """totalVI on a GPU; saves its latent space keyed by cell_id. The protein intensities are rounded to counts."""
-    import pandas as pd
-    import scvi
-
-    scvi.settings.seed = 0
-    adata = rna.copy()
-    adata.obsm["prot_counts"] = pd.DataFrame(
-        np.round(prot.layers["intensity"]), index=adata.obs_names, columns=prot.var_names
-    )
-    scvi.model.TOTALVI.setup_anndata(adata, layer="counts", protein_expression_obsm_key="prot_counts")
-    model = scvi.model.TOTALVI(adata, n_latent=N_LATENT)
-    # scvi-tools defaults: the epoch heuristic, no early stopping (with the KL warm-up it stops after a few epochs)
-    model.train(accelerator="gpu", enable_progress_bar=False)
-    np.savez_compressed(out, cell_id=rna.obs["cell_id"].to_numpy().astype(str),
-                        latent=model.get_latent_representation().astype(np.float16))
-
-
-def train_mofa(rna, prot, out: Path) -> None:
-    """MOFA+ on a GPU; saves the factors (keyed by cell_id), the weights and the variance explained per view."""
+def train_mofa(views: dict, out: Path) -> None:
+    """MOFA+ on a GPU over the given views (name -> AnnData of the same cells); saves the factors (keyed by cell_id),
+    the weights and the variance explained per view."""
     import h5py
     import mudata as md
     import muon as mu
 
-    mdata = md.MuData({"rna": rna.copy(), "prot": prot.copy()})
+    mdata = md.MuData({name: view.copy() for name, view in views.items()})
     model_file = Path(out).with_suffix(".hdf5")
     mu.tl.mofa(mdata, n_factors=N_LATENT, use_var=None, scale_views=True, convergence_mode="fast", seed=0,
                use_float32=True, gpu_mode=True, outfile=str(model_file), save_data=False)
     variance = mdata.uns["mofa"]["variance"]
+    result = {"cell_id": mdata.obs_names.to_numpy().astype(str), "factors": mdata.obsm["X_mofa"].astype(np.float16),
+              "views": np.array(list(views))}
     # the weights per view, from the model file: in mdata.varm the order of the views is not that of mdata.mod
     with h5py.File(model_file) as f:
-        weights = {view: f[f"expectations/W/{view}"][:].T.astype(np.float32) for view in ("rna", "prot")}
-        names = {view: f[f"features/{view}"][:].astype(str) for view in ("rna", "prot")}
-    assert (names["rna"] == rna.var_names).all() and (names["prot"] == prot.var_names).all()
-    np.savez_compressed(
-        out,
-        cell_id=rna.obs["cell_id"].to_numpy().astype(str),
-        factors=mdata.obsm["X_mofa"].astype(np.float16),
-        genes=names["rna"],
-        weights_rna=weights["rna"],
-        proteins=names["prot"],
-        weights_prot=weights["prot"],
-        r2_rna=np.asarray(variance["rna"], dtype=np.float32),
-        r2_prot=np.asarray(variance["prot"], dtype=np.float32),
-    )
+        for name, view in views.items():
+            features = f[f"features/{name}"][:].astype(str)
+            assert (features == view.var_names).all()
+            result[f"features_{name}"] = features
+            result[f"weights_{name}"] = f[f"expectations/W/{name}"][:].T.astype(np.float32)
+            result[f"r2_{name}"] = np.asarray(variance[name], dtype=np.float32)
+    np.savez_compressed(out, **result)
     model_file.unlink()
+
+
+def patch_muon_wnn():
+    """muon 0.2.0's WNN returns NaN for cells whose neighbors in a modality are at distance 0 (identical profiles)."""
+    import inspect
+    import textwrap
+
+    import muon.pp
+
+    source = textwrap.dedent(inspect.getsource(muon.pp.neighbors))
+    fixes = {
+        # include the neighbors at distance 0, which `.nonzero()` drops
+        "X[neighbordistances[cell, :].nonzero()[1], :]": (
+            "X[neighbordistances.indices[neighbordistances.indptr[cell] : neighbordistances.indptr[cell + 1]], :]"
+        ),
+        # keep the kernel bandwidth above the nearest-neighbor distance, which is 0 for identical profiles
+        "        currtheta = 0\n": "        csigmas = np.maximum(csigmas, nndistances + eps)\n        currtheta = 0\n",
+    }
+    for old, new in fixes.items():
+        assert source.count(old) == 1, "the patch does not apply to this muon version"
+        source = source.replace(old, new)
+    exec(compile(source, muon.pp.__file__, "exec"), muon.pp.__dict__)
