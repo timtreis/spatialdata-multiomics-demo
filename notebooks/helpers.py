@@ -311,7 +311,8 @@ SINGLE_CELL_OPERATIONS = ("drop_degenerate", "variance_threshold", "correlation_
 BORDER_UM = 20
 
 
-def preprocess_morphology(profiles, image_shape: tuple[int, int], channels: list[str] | None = None):
+def preprocess_morphology(profiles, image_shape: tuple[int, int], channels: list[str] | None = None,
+                          method: str = "standardize"):
     """mantispy's single-cell workflow: cell QC, feature QC, normalization, feature selection.
 
     Three choices differ from mantispy's defaults, because on single cells of a tissue they lose signal (the
@@ -321,7 +322,8 @@ def preprocess_morphology(profiles, image_shape: tuple[int, int], channels: list
     unusual area are flagged (``obs["qc_area_outlier"]``) but kept, since in a tissue they are large or small cell
     types, not segmentation errors, which the QC on cell area has already removed. Cells within ``BORDER_UM`` of the
     edge of the image (``image_shape``, in pixels) are removed: the stains are cut off there. ``channels`` limits the
-    features to those stains (and the cell shape).
+    features to those stains (and the cell shape); ``method`` is mantispy's normalization (``"mad_robustize"`` is its
+    default).
     """
     import mantispy as mt
 
@@ -330,11 +332,11 @@ def preprocess_morphology(profiles, image_shape: tuple[int, int], channels: list
         a = a[:, a.var["channel"].isna().to_numpy() | a.var["channel"].isin(channels).to_numpy()].copy()
     mt.pp.calculate_qc_metrics(a, image_shape=image_shape, border_margin=round(BORDER_UM / PIXEL_SIZE),
                                max_nan_fraction=0.0)
-    # area outliers kept, see above
+    # mantispy's own qc_pass also fails the area outliers; ours fails only border cells and undefined features
     a.obs["qc_pass"] = (a.obs["qc_nan_fraction"].to_numpy() == 0) & ~a.obs["qc_is_border"].to_numpy()
-    mt.pp.filter_cells(a, min_cells_per_well=0)
+    mt.pp.filter_cells(a, min_cells_per_well=0)  # the per-well minimum is for screens; the section is one well
     mt.pp.filter_features(a, min_variance=1e-8)
-    mt.pp.normalize(a, method="standardize", by="Metadata_Plate", reference=None)
+    mt.pp.normalize(a, method=method, by="Metadata_Plate", reference=None)  # over all cells of the one plate
     mt.pp.feature_select(a, operations=SINGLE_CELL_OPERATIONS, na_cutoff=0.0)
     a.uns["feature_select"] = dict(a.uns["mantispy"]["feature_select"])
     return mt.pp.subset_features(a)
@@ -398,3 +400,114 @@ def patch_muon_wnn():
         assert source.count(old) == 1, "the patch does not apply to this muon version"
         source = source.replace(old, new)
     exec(compile(source, muon.pp.__file__, "exec"), muon.pp.__dict__)
+
+
+_GROUP_NAMES = {"Intensity": "intensity", "Texture": "texture", "Granularity": "granularity",
+                "RadialDistribution": "radial distribution", "AreaShape": "shape"}
+
+
+def feature_labels(var) -> "pd.Series":
+    """Readable names of mantispy's morphology features (``var`` as in ``morph.var``), for tables and plots:
+    ``Cells_Texture_InfoMeas1_CD45RA_3_00_256`` becomes ``CD45RA texture: info meas 1``."""
+    import re
+
+    import pandas as pd
+
+    def words(name):
+        text = re.sub(r"(?<=[a-z])(?=[A-Z0-9])|(?<=[A-Z])(?=[A-Z][a-z])", " ", str(name)).lower()
+        return text.replace("zernike", "Zernike").replace(" cv", " CV")
+
+    labels = []
+    for channel, group, feature, scale in zip(var["channel"], var["feature_group"], var["feature"], var["scale"],
+                                              strict=True):
+        stain = channel if isinstance(channel, str) else ""
+        label = f"{stain} {_GROUP_NAMES.get(str(group), str(group).lower())}: {words(feature)}".strip()
+        if str(group) == "Granularity" and pd.notna(scale):
+            label += f" {scale}"  # the spot size
+        labels.append(label)
+    return pd.Series(labels, index=var.index)
+
+
+def draw_pipeline():
+    """The steps of the tutorial, from the raw data to the cell types, as a figure."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+
+    boxes = {  # name: (x, y, text, color)
+        "raw": (0.0, 1.0, "Xenium Protein output:\ntranscripts, segmentation,\n28 stain images, H&E", "0.85"),
+        "sdata": (2.4, 1.0, "SpatialData object\n(section 1)", "0.85"),
+        "rnaqc": (4.8, 1.8, "RNA: QC, normalize\n(sections 2, 3)", "#c6dbef"),
+        "cpm": (4.8, 0.2, "cp_measure via squidpy,\nstains scaled 0-1\n(sections 1, 2)", "#fdd0a2"),
+        "mantis": (7.2, 0.2, "mantispy: cell QC,\nz-scores, feature\nselection (section 3)", "#fdd0a2"),
+        "mudata": (9.6, 1.0, "MuData table:\nrna + morph", "0.85"),
+        "mofa": (12.0, 1.8, "MOFA+: shared and\nspecific factors\n(section 4)", "#c7e9c0"),
+        "wnn": (12.0, 0.2, "WNN graph, Leiden:\ncell types\n(section 5)", "#c7e9c0"),
+        "bio": (14.4, 1.0, "spatial organization,\nRNA vs protein\n(sections 6, 7)", "#dadaeb"),
+    }
+    edges = [("raw", "sdata"), ("sdata", "rnaqc"), ("sdata", "cpm"), ("cpm", "mantis"), ("rnaqc", "mudata"),
+             ("mantis", "mudata"), ("mudata", "mofa"), ("mudata", "wnn"), ("wnn", "bio")]
+    w, h = 2.0, 1.05
+    fig, ax = plt.subplots(figsize=(17, 3.4))
+    for x, y, text, color in boxes.values():
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.05", fc=color, ec="0.3"))
+        ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=8)
+    for a, b in edges:
+        (xa, ya, *_), (xb, yb, *_) = boxes[a], boxes[b]
+        ax.annotate("", xy=(xb, yb + h / 2), xytext=(xa + w, ya + h / 2),
+                    arrowprops={"arrowstyle": "->", "color": "0.3", "shrinkA": 4, "shrinkB": 4})
+    ax.text(8.2, 3.0, "computed once and read from disk: data/morph.h5ad (morphology), cache/mofa.npz, "
+            "cache/clusters.npz", fontsize=8, color="0.35", ha="center")
+    ax.set(xlim=(-0.2, 16.6), ylim=(0, 3.2))
+    ax.set_axis_off()
+    return fig
+
+
+def draw_feature_groups(seed: int = 0):
+    """What each group of cp_measure features measures, shown on drawn example cells."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle, Ellipse
+
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[-1:1:120j, -1:1:120j]
+    r = np.hypot(xx, yy)
+    inside = r < 0.8
+    membrane = np.exp(-((r - 0.72) / 0.06) ** 2) * inside + 0.05 * rng.random(r.shape) * inside
+    spots = np.zeros_like(r)
+    for cx, cy, s in rng.uniform([-0.5, -0.5, 0.04], [0.5, 0.5, 0.12], (14, 3)):
+        spots += np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * s**2))
+    spots = spots * inside + 0.05 * rng.random(r.shape) * inside
+
+    fig, axs = plt.subplots(1, 5, figsize=(17, 4.2))
+    titles = ["intensity: how bright\n(mean, quantiles, at the edge)",
+              "texture: how neighboring pixels\ndiffer (3 px apart, 4 directions)",
+              "granularity: how much signal\nis in spots of each size",
+              "radial distribution: how the signal\nspreads from center to edge",
+              "shape: size and form\nof the outline"]
+    images = [membrane, spots, spots, membrane, None]
+    for ax, title, image in zip(axs, titles, images, strict=True):
+        if image is not None:
+            ax.imshow(image, cmap="magma", extent=(-1, 1, -1, 1), origin="lower")
+        ax.set_title(title, fontsize=9)
+        ax.set(xlim=(-1, 1), ylim=(-1, 1), aspect="equal")
+        ax.set_axis_off()
+    for angle in (0, 45, 90, 135):  # pixel pairs of the co-occurrence matrix
+        dx, dy = 0.3 * np.cos(np.radians(angle)), 0.3 * np.sin(np.radians(angle))
+        axs[1].annotate("", xy=(-0.3 + dx, -0.3 + dy), xytext=(-0.3, -0.3),
+                        arrowprops={"arrowstyle": "->", "color": "w", "lw": 1.5})
+    for size in (0.05, 0.1, 0.2):
+        axs[2].add_patch(Circle((0.55, -0.6 + 3 * size), size, fill=False, ec="w", lw=1.2))
+    for radius in (0.2, 0.4, 0.6, 0.8):
+        axs[3].add_patch(Circle((0, 0), radius, fill=False, ec="w", lw=1, ls="--"))
+    axs[4].add_patch(Ellipse((0, 0), 1.5, 0.9, angle=20, fill=False, ec="k", lw=2))
+    axs[4].annotate("", xy=(0.7, 0.26), xytext=(-0.7, -0.26), arrowprops={"arrowstyle": "<->", "color": "C3"})
+    axs[4].text(0, -0.75, "area, elongation, solidity,\nmoments of the outline", ha="center", fontsize=8)
+    fig.subplots_adjust(top=0.8, wspace=0.1)
+    return fig
+
+
+def scale_bar(ax, length: float, label: str, units_per_pixel: float = 1.0, color: str = "k"):
+    """A scale bar of ``length`` (in µm) in the lower right of ``ax``; one data unit of ``ax`` is ``units_per_pixel`` µm."""
+    from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+
+    ax.add_artist(AnchoredSizeBar(ax.transData, length / units_per_pixel, label, "lower right", pad=0.5, color=color,
+                                  frameon=False, size_vertical=length / units_per_pixel / 25))
